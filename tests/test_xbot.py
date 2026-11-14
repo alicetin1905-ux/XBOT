@@ -211,22 +211,24 @@ def test_limit_order_expires_unfilled():
 def fake_frame(lows, closes, opens, trend_sign=1):
     n = len(lows)
     f = pd.DataFrame({"open": opens, "high": np.maximum(opens, closes) + 0.1, "low": lows,
-                      "close": closes, "atr_5m": 1.0, "f_5m_rsi": 0.0, "f_15m_rsi": 0.0})
+                      "close": closes, "atr_5m": 1.0, "atr_1h": 3.0, "f_5m_rsi": 0.0, "f_15m_rsi": 0.0})
     for c in ("f_30m_ema_cross", "f_30m_di_diff", "f_1h_ema_cross", "f_1h_di_diff"):
         f[c] = 0.1 * trend_sign
     return f
 
 
 def test_fakeout_fires_on_small_false_break_with_trend_only():
-    n = 30
+    n = 40
     lows, opens, closes = np.full(n, 100.0), np.full(n, 100.5), np.full(n, 100.6)
-    lows[20], opens[20], closes[20] = 99.5, 100.4, 99.8     # breaks the 100 low, closes below
-    lows[21], opens[21], closes[21] = 99.7, 99.8, 100.7     # next candle snaps back above 100
+    lows[30], opens[30], closes[30] = 99.5, 100.4, 99.8     # breaks the 100 low, closes below
+    lows[31], opens[31], closes[31] = 99.7, 99.8, 100.7     # next candle snaps back above 100
     fakes = lambda f, **kw: [(r, d) for r, s, d in find_setups(f, **kw) if s == 3]
-    assert fakes(fake_frame(lows, closes, opens)) == [(21, 1)]
+    assert fakes(fake_frame(lows, closes, opens)) == [(31, 1)]
     assert fakes(fake_frame(lows, closes, opens, trend_sign=-1)) == []   # not against the trend
-    deep = lows.copy(); deep[20] = 97.0                                  # 3 ATR: a real break
+    deep = lows.copy(); deep[30] = 97.0                                  # 3 ATR: a real break
     assert fakes(fake_frame(deep, closes, opens)) == []
-    wick = lows.copy(); wick[20], wick[21] = 100.0, 99.6                 # one-candle wick
-    c2, o2 = closes.copy(), opens.copy(); c2[20], o2[21] = 100.6, 100.2
-    assert fakes(fake_frame(wick, c2, o2)) == [(21, 1)]
+    wick = lows.copy(); wick[30], wick[31] = 100.0, 99.6                 # one-candle wick
+    c2, o2 = closes.copy(), opens.copy(); c2[30], o2[31] = 100.6, 100.2
+    assert fakes(fake_frame(wick, c2, o2)) == [(31, 1)]
+    wide = lows.copy(); wide[15] = 96.0     # the range before the poke was not narrow
+    assert fakes(fake_frame(wide, closes, opens)) == []

@@ -26,13 +26,15 @@ def trend(frame):
     return up.astype(int) - dn.astype(int)
 
 
-def find_setups(frame, lookback=24, cooldown=12, fake_lookback=12, fake_depth=1.5):
+def find_setups(frame, lookback=24, cooldown=12, fake_lookback=24, fake_depth=1.5,
+                fake_range=1.0):
     """Returns a list of (row, setup_index, side) sorted by row.
 
     Entries come from the 5m and 15m charts and only go with the 30m/1h trend;
     without a trend only the reversal setup is allowed.
-    fake_lookback: candles that define the level for a fakeout; fake_depth: how far price
-    may go through that level, in 5m ATRs, to still count as a *small* false break.
+    fake_lookback: candles of sideways movement before a fakeout; fake_range: max height of
+    that sideways range, in 1h ATRs; fake_depth: how far price may poke out of the range,
+    in 5m ATRs, to still count as a *small* false break.
     """
     c = frame["close"]
     chan_hi = frame["high"].rolling(lookback).max().shift(1)
@@ -40,15 +42,16 @@ def find_setups(frame, lookback=24, cooldown=12, fake_lookback=12, fake_depth=1.
     rsi5, rsi15 = frame["f_5m_rsi"], frame["f_15m_rsi"]
     tr = trend(frame)
     up, dn, flat = tr > 0, tr < 0, tr == 0
-    # fakeout: this or the previous 5m candle pokes through the recent low (in an uptrend)
-    # by a small amount, and this candle closes back above that level as a rising candle
+    # fakeout: the 5m chart went sideways in a narrow range; this or the previous candle
+    # pokes out of that range against the trend, and this candle closes back inside it
     o, h, l, atr5 = frame["open"], frame["high"], frame["low"], frame["atr_5m"]
     lvl_lo = l.rolling(fake_lookback).min().shift(2)
     lvl_hi = h.rolling(fake_lookback).max().shift(2)
-    dip = lvl_lo - np.minimum(l, l.shift(1))        # how far price went below the level
+    sideways = (lvl_hi - lvl_lo) <= fake_range * frame["atr_1h"]
+    dip = lvl_lo - np.minimum(l, l.shift(1))        # how far price went below the range
     spike = np.maximum(h, h.shift(1)) - lvl_hi
-    fake_long = up & (dip > 0) & (dip < fake_depth * atr5) & (c > lvl_lo) & (c > o)
-    fake_short = dn & (spike > 0) & (spike < fake_depth * atr5) & (c < lvl_hi) & (c < o)
+    fake_long = up & sideways & (dip > 0) & (dip < fake_depth * atr5) & (c > lvl_lo) & (c > o)
+    fake_short = dn & sideways & (spike > 0) & (spike < fake_depth * atr5) & (c < lvl_hi) & (c < o)
     conds = [
         (3, 1, fake_long),
         (3, -1, fake_short),
@@ -86,7 +89,8 @@ def prepare_symbol(candles, cfg, derivs=None):
     X = frame[cols].to_numpy(np.float32)
     events = {}
     for row, setup, side in find_setups(frame, cfg.breakout_lookback, cfg.setup_cooldown,
-                                         cfg.fakeout_lookback, cfg.fakeout_depth_atr):
+                                         cfg.fakeout_lookback, cfg.fakeout_depth_atr,
+                                         cfg.fakeout_range_atr):
         x = X[row] * np.where(mirror, side, 1).astype(np.float32)
         onehot = np.zeros(len(SETUPS) + 1, np.float32)
         onehot[setup], onehot[-1] = 1, side

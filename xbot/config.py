@@ -15,7 +15,8 @@ class Config:
 
     # Setup detection
     breakout_lookback: int = 24  # base candles for the high/low channel (2 hours)
-    fakeout_lookback: int = 12   # base candles (1 hour) whose low/high a fakeout pokes through
+    fakeout_lookback: int = 24   # base candles (2 hours) of sideways movement before a fakeout
+    fakeout_range_atr: float = 1.0  # max height of that sideways range, in 1h ATRs
     fakeout_depth_atr: float = 1.5  # max depth of that poke, in 5m ATRs
     setup_cooldown: int = 12     # a setup must have been absent this many candles to fire again
 

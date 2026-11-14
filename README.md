@@ -41,9 +41,9 @@ dus stoppen en herstarten kan gewoon.
    - *breakout*: 5m-koers breekt uit zijn kanaal van 2 uur, in de richting van de trend;
    - *pullback*: 5m- of 15m-RSI zakt tegen de trend in;
    - *reversal*: 15m-RSI extreem, alleen als er geen trend is;
-   - *fakeout*: de koers prikt tegen de trend in door het dieptepunt (of hoogtepunt) van
-     het laatste uur, hooguit 1,5× de 5m-ATR diep, en de 5m-candle sluit er meteen weer
-     boven (onder).
+   - *fakeout*: de 5m-chart beweegt 2 uur zijwaarts in een smalle range (hooguit 1× de
+     1H-ATR hoog); de koers prikt tegen de trend in uit die range, hooguit 1,5× de 5m-ATR
+     diep, en de 5m-candle sluit er meteen weer binnen.
 5. **Beoordelen** – een boommodel (gradient boosting, `xbot/model.py`) voorspelt per
    kandidaat het verwachte resultaat na kosten. Eén model voor alle munten.
 6. **Handelen** – alleen kandidaten met genoeg verwachte winst worden een paper trade.
@@ -97,10 +97,15 @@ Met limit-orders dalen de kosten: alle kandidaten gemiddeld −0,040 R in plaats
 97% van de instap-orders gevuld. Het blijft negatief; doordat de zelfcontrole vaker
 openging werd er meer gehandeld: 226 trades, −11,5% (market-orders: 44 trades, −8,2%).
 
-De fakeout-setup (valse uitbraak tegen de trend in) gaf 14.023 kandidaten met gemiddeld
-−0,050 R; door het model gekozen −0,081 R. Met een krappe stop net voorbij de prik is het
-resultaat vóór kosten ongeveer nul en na kosten ongeveer −0,3 R, omdat de kosten dan zwaar
-wegen tegenover de kleine stopafstand (mediaan 0,25%).
+De fakeout-setup (zijwaarts, valse uitbraak tegen de trend in, dan met de trend mee) gaf
+3.856 kandidaten met gemiddeld −0,041 R; door het model gekozen −0,081 R. De eis van een
+smalle zijwaartse fase verandert het gemiddelde niet (−0,037 tot −0,049 R bij strengere of
+soepelere definities). Met een krappe stop net voorbij de prik is het resultaat na kosten
+ongeveer −0,3 R, omdat de kosten dan zwaar wegen tegenover de kleine stopafstand.
+
+De laatste ontwikkel-backtest eindigde op +9,8% (156 trades, profit factor 1,18). Dat is
+toeval en geen edge: alle 2.291 signalen van het model samen deden gemiddeld −0,076 R, en
+de voorspellingen hangen niet samen met de uitkomst (correlatie −0,008).
 
 Dit is dus een eerlijk testplatform, geen winstgevende strategie. Gebruik het niet met
 echt geld.

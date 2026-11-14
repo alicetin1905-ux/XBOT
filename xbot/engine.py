@@ -1,62 +1,49 @@
-"""The learning + trading loop, shared by backtest and live paper trading.
+"""The learning + paper-trading loop, shared by backtest and live trading.
 
-For every closed base candle the engine:
-  1. lets the broker check the open position (stop / target / timeout),
-  2. resolves older samples whose outcome is now known and learns from them,
-  3. predicts the current candle and, if the edge is big enough, opens a paper trade,
-  4. stores the current candle as a pending sample to learn from later.
+Every setup the rules find becomes a *candidate*: a virtual trade with stop, target and
+timeout. All candidates are followed to their outcome and become training data, whether
+or not they were really traded. A candidate becomes a real paper trade when the model
+expects enough profit and the self-check gate is open.
 """
 import json
 import os
+import pickle
 from collections import deque
 
 import numpy as np
 import pandas as pd
 
-from .broker import PaperBroker
 from .config import Config
-from .features import feature_columns
-from .model import OnlineLogit
+from .model import SetupModel
+from .setups import SETUPS
+
+HOUR = 3_600_000
 
 
 class Engine:
-    def __init__(self, cfg: Config, n_features: int):
+    def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.model = OnlineLogit(n_features, cfg.lr, cfg.l2)
-        self.broker = PaperBroker(cfg.start_balance, cfg.fee, cfg.slippage)
-        self.pending = []                       # samples waiting for their outcome
-        self.gate = deque(maxlen=cfg.gate_window)  # net result (in R) of recent signals
-        self.scores = deque(maxlen=2000)        # (was prediction right?, log-loss) per sample
-        self.last_ms = 0
+        self.model = SetupModel()
+        self.balance = cfg.start_balance
+        self.open = {}            # symbol -> candidates still running (real trades have qty > 0)
+        self.X, self.r, self.t = [], [], []   # resolved candidates = training data
+        self.gate = deque(maxlen=cfg.gate_window)  # net R of the model's recent signals
+        self.log = []             # resolved candidates that had a prediction (for reporting)
+        self.trades = []
+        self.last_ms = {}
+        self.last_price = {}
         self.equity_curve = []
+        self.next_train_ms = 0
+        self.trade_from_ms = 0    # no real trades before this time (learning only)
+        self._dirty = True
 
-    # ---- learning -------------------------------------------------------
-    def _resolve(self, high, low, close):
-        cost = self.cfg.round_trip_cost
-        keep = []
-        for s in self.pending:
-            up, dn = high >= s["up"], low <= s["dn"]
-            s["bars_left"] -= 1
-            if up and dn:        # both barriers inside one candle: outcome unknown
-                y, w, move = None, 0.0, -s["b"] * s["signal"]  # count as a loss for a signal
-            elif up:
-                y, w, move = 1.0, 1.0, s["b"]
-            elif dn:
-                y, w, move = 0.0, 1.0, -s["b"]
-            elif s["bars_left"] <= 0:
-                move = close / s["entry"] - 1
-                y, w = float(move > 0), min(1.0, abs(move) / s["b"])
-            else:
-                keep.append(s)
-                continue
-            if y is not None:
-                p = min(max(s["p"], 1e-6), 1 - 1e-6)
-                self.scores.append((float((p > 0.5) == (y > 0.5)),
-                                    -(y * np.log(p) + (1 - y) * np.log(1 - p))))
-                self.model.update(np.asarray(s["x"]), y, w)
-            if s["signal"]:
-                self.gate.append((s["signal"] * move - cost) / s["b"])
-        self.pending = keep
+    # ---- account --------------------------------------------------------
+    def positions(self):
+        return [(s, e) for s, lst in self.open.items() for e in lst if e["qty"] > 0]
+
+    def equity(self):
+        return self.balance + sum(e["side"] * e["qty"] * (self.last_price[s] - e["entry_px"])
+                                  for s, e in self.positions())
 
     def gate_open(self):
         if len(self.gate) < self.cfg.gate_min_samples:
@@ -64,109 +51,217 @@ class Engine:
         g = np.asarray(self.gate)
         return float(g.mean() - self.cfg.gate_z * g.std() / np.sqrt(len(g))) > 0
 
-    # ---- one candle -----------------------------------------------------
-    def on_bar(self, close_ms, high, low, close, atr, x, trade=True):
+    # ---- learning -------------------------------------------------------
+    def retrain(self, now_ms):
+        if len(self.r) < self.cfg.min_train:
+            return False
+        start = now_ms - self.cfg.train_window_days * 24 * HOUR
+        i = int(np.searchsorted(np.asarray(self.t), start))
+        self.X, self.r, self.t = self.X[i:], self.r[i:], self.t[i:]
+        self.model.fit(np.asarray(self.X, np.float32), np.asarray(self.r))
+        self.next_train_ms = now_ms + int(self.cfg.retrain_hours * HOUR)
+        self._dirty = True
+        return True
+
+    def _finish(self, sym, e, exit_price, reason, now_ms, out):
         cfg = self.cfg
-        closed = self.broker.on_bar(high, low, close, close_ms)
-        self._resolve(high, low, close)
-        self.model.observe(x)
+        r = (e["side"] * (exit_price / e["entry"] - 1) - cfg.round_trip_cost) / e["b"]
+        self.X.append(e["x"]); self.r.append(r); self.t.append(e["t"])
+        self._dirty = True
+        if e["p"] is not None:
+            self.log.append((e["t"], sym, e["setup"], e["side"], e["p"], e["signal"], r))
+        if e["signal"]:
+            self.gate.append(r)
+        if e["qty"] > 0:
+            exit_px = exit_price * (1 - e["side"] * cfg.slippage)
+            exit_fee = e["qty"] * exit_px * cfg.fee
+            gross = e["side"] * e["qty"] * (exit_px - e["entry_px"])
+            self.balance += gross - exit_fee
+            trade = {"symbol": sym, "setup": SETUPS[e["setup"]],
+                     "side": "long" if e["side"] > 0 else "short",
+                     "entry_ms": e["t"], "exit_ms": int(now_ms), "qty": e["qty"],
+                     "entry": e["entry_px"], "exit": exit_px, "reason": reason,
+                     "expected_r": e["p"],
+                     "pnl": gross - exit_fee - e["qty"] * e["entry_px"] * cfg.fee,
+                     "balance": self.balance}
+            self.trades.append(trade)
+            out["closed"].append(trade)
 
-        p = self.model.predict(x)
-        b = cfg.barrier_atr * atr / close             # barrier distance as a fraction of price
-        need = (b + cfg.round_trip_cost) / (2 * b) + cfg.min_edge  # break-even probability + margin
-        signal = 0
-        if self.model.updates >= cfg.min_train:
-            if p > need:
-                signal = 1
-            elif 1 - p > need and cfg.allow_short:
-                signal = -1
+    # ---- one candle of one symbol ---------------------------------------
+    def on_bar(self, sym, close_ms, high, low, close, atr, events=(), trade=True):
+        cfg = self.cfg
+        out = {"closed": [], "opened": [], "candidates": []}
+        close_ms = int(close_ms)
+        self.last_price[sym] = close
+        self.last_ms[sym] = close_ms
 
-        opened = None
-        if trade and signal and self.broker.position is None and self.gate_open():
-            equity = self.broker.equity(close)
-            qty = min(equity * cfg.risk_per_trade / (b * close), equity * cfg.max_leverage / close)
-            self.broker.open(signal, qty, close, sl=close * (1 - signal * b),
-                             tp=close * (1 + signal * b), bars=cfg.horizon,
-                             time_ms=close_ms, prob=p)
-            opened = self.broker.position
+        running = self.open.get(sym)
+        if running:
+            keep = []
+            for e in running:
+                s = e["side"]
+                hit_sl = low <= e["sl"] if s > 0 else high >= e["sl"]
+                hit_tp = high >= e["tp"] if s > 0 else low <= e["tp"]
+                e["bars_left"] -= 1
+                if hit_sl:    # stop and target in the same candle: assume the stop came first
+                    self._finish(sym, e, e["sl"], "stop", close_ms, out)
+                elif hit_tp:
+                    self._finish(sym, e, e["tp"], "target", close_ms, out)
+                elif e["bars_left"] <= 0:
+                    self._finish(sym, e, close, "timeout", close_ms, out)
+                else:
+                    keep.append(e)
+            self.open[sym] = keep
 
-        self.pending.append({"x": [float(v) for v in x], "p": p, "entry": close, "b": b,
-                             "up": close * (1 + b), "dn": close * (1 - b),
-                             "bars_left": cfg.horizon, "signal": signal})
-        self.last_ms = int(close_ms)
-        self.equity_curve.append((int(close_ms), self.broker.equity(close)))
-        return {"p": p, "need": need, "signal": signal, "opened": opened, "closed": closed}
+        if close_ms >= self.next_train_ms:
+            self.retrain(close_ms)
 
-    def run_frame(self, frame, trade=True, trade_only_last=False):
-        """Feed every not-yet-seen row of a feature frame through the engine."""
-        cols = feature_columns(frame)
-        new = frame[frame["close_ms"] > self.last_ms]
-        if self.last_ms and len(new) and new["close_ms"].iloc[0] - self.last_ms > 300_000 * 2:
-            # we missed more candles than the fetched history covers: outcomes are unknowable
-            if len(new) == len(frame):
-                self.pending = []
-        X = new[cols].to_numpy(float)
-        meta = new[["close_ms", "high", "low", "close", "atr_ref"]].to_numpy(float)
+        for setup, side, x in events:
+            p = self.model.predict(x)
+            b = cfg.barrier_atr * atr / close       # barrier distance as a fraction of price
+            signal = bool(p is not None and p > cfg.min_edge_r
+                          and (side > 0 or cfg.allow_short))
+            qty, entry_px = 0.0, close * (1 + side * cfg.slippage)
+            real = self.positions()
+            if (trade and signal and close_ms >= self.trade_from_ms and self.gate_open()
+                    and len(real) < cfg.max_positions and all(s != sym for s, _ in real)):
+                eq = self.equity()
+                qty = min(eq * cfg.risk_per_trade / (b * close), eq * cfg.max_leverage / close)
+                self.balance -= qty * entry_px * cfg.fee
+            e = {"x": [float(v) for v in x], "setup": int(setup), "side": int(side),
+                 "entry": close, "b": b, "sl": close * (1 - side * b),
+                 "tp": close * (1 + side * b), "bars_left": cfg.horizon, "p": p,
+                 "signal": signal, "t": close_ms, "qty": qty, "entry_px": entry_px}
+            self.open.setdefault(sym, []).append(e)
+            out["candidates"].append(e)
+            if qty > 0:
+                out["opened"].append(e)
+
+        if close_ms % HOUR == 0 and close_ms >= self.trade_from_ms and (
+                not self.equity_curve or self.equity_curve[-1][0] != close_ms):
+            self.equity_curve.append((close_ms, self.equity()))
+        return out
+
+    def run(self, prepared, trade=True, trade_only_last=False, until_ms=None):
+        """Feed all unseen candles of all symbols through the engine in time order.
+
+        prepared: {symbol: (bars, events)} from setups.prepare_symbol.
+        """
+        syms = list(prepared)
+        parts = []
+        for k, s in enumerate(syms):
+            ms = prepared[s][0][:, 0]
+            rows = np.nonzero((ms > self.last_ms.get(s, 0)) & (ms < (until_ms or np.inf)))[0]
+            parts.append(np.column_stack([ms[rows], np.full(len(rows), k), rows]))
+        allrows = np.concatenate(parts) if parts else np.zeros((0, 3))
+        if not len(allrows):
+            return []
+        allrows = allrows[np.lexsort((allrows[:, 1], allrows[:, 0]))]
+        latest = allrows[-1, 0]
         results = []
-        for i in range(len(new)):
-            t = trade and (not trade_only_last or i == len(new) - 1)
-            results.append(self.on_bar(*meta[i], X[i], trade=t))
+        for ms, k, row in allrows:
+            s = syms[int(k)]
+            bars, events = prepared[s]
+            ev = events.get(int(row), ())
+            if not ev and not self.open.get(s) and ms % HOUR:
+                self.last_ms[s] = int(ms)
+                self.last_price[s] = bars[int(row), 3]
+                continue
+            t = trade and (not trade_only_last or ms == latest)
+            res = self.on_bar(s, *bars[int(row)], events=ev, trade=t)
+            if res["closed"] or res["opened"] or res["candidates"]:
+                results.append((s, res))
         return results
 
     # ---- reporting ------------------------------------------------------
     def stats(self):
-        tr = self.broker.trades
-        pnl = np.array([t["pnl"] for t in tr]) if tr else np.zeros(0)
-        eq = np.array([e for _, e in self.equity_curve]) if self.equity_curve else np.array([self.cfg.start_balance])
-        dd = float(((np.maximum.accumulate(eq) - eq) / np.maximum.accumulate(eq)).max())
+        pnl = np.array([t["pnl"] for t in self.trades])
+        eq = np.array([e for _, e in self.equity_curve] or [self.cfg.start_balance])
+        peak = np.maximum.accumulate(eq)
         wins, losses = pnl[pnl > 0].sum(), -pnl[pnl < 0].sum()
-        sc = np.array(self.scores) if self.scores else np.zeros((0, 2))
+        equity = self.equity()
         return {
-            "equity": float(eq[-1]),
-            "return_pct": float(eq[-1] / self.cfg.start_balance - 1) * 100,
-            "trades": len(tr),
+            "equity": equity,
+            "return_pct": (equity / self.cfg.start_balance - 1) * 100,
+            "trades": len(pnl),
             "win_rate": float((pnl > 0).mean()) if len(pnl) else None,
             "profit_factor": float(wins / losses) if losses > 0 else None,
-            "max_drawdown_pct": dd * 100,
-            "samples_learned": self.model.updates,
-            "accuracy_recent": float(sc[:, 0].mean()) if len(sc) else None,
-            "logloss_recent": float(sc[:, 1].mean()) if len(sc) else None,  # 0.693 = coin flip
+            "max_drawdown_pct": float(((peak - eq) / peak).max()) * 100,
+            "samples": len(self.r),
+            "model_trained_on": self.model.n_train,
             "gate_signals": len(self.gate),
-            "gate_avg_R": float(np.mean(self.gate)) if self.gate else None,
+            "gate_avg_r": float(np.mean(self.gate)) if self.gate else None,
             "gate_open": self.gate_open(),
         }
+
+    def setup_table(self, from_ms=0):
+        """Per setup: all predicted candidates vs. the ones the model selected."""
+        rows = []
+        log = [l for l in self.log if l[0] >= from_ms]
+        for k, name in list(enumerate(SETUPS)) + [(None, "totaal")]:
+            sel = [l for l in log if k is None or l[2] == k]
+            r_all = np.array([l[6] for l in sel])
+            r_sig = np.array([l[6] for l in sel if l[5]])
+            rows.append({"setup": name, "n": len(r_all),
+                         "avg_r": float(r_all.mean()) if len(r_all) else None,
+                         "n_selected": len(r_sig),
+                         "avg_r_selected": float(r_sig.mean()) if len(r_sig) else None})
+        return rows
+
+    def prediction_quality(self, from_ms=0):
+        """Correlation between predicted and realised R, and realised R per prediction quintile."""
+        log = [l for l in self.log if l[0] >= from_ms]
+        if len(log) < 50:
+            return None
+        p, r = np.array([l[4] for l in log]), np.array([l[6] for l in log])
+        edges = np.quantile(p, [0.2, 0.4, 0.6, 0.8])
+        q = np.searchsorted(edges, p)
+        return {"corr": float(np.corrcoef(p, r)[0, 1]) if p.std() > 0 else 0.0,
+                "quintile_avg_r": [float(r[q == i].mean()) if (q == i).any() else None
+                                   for i in range(5)]}
 
     # ---- persistence ----------------------------------------------------
     def save(self):
         d = self.cfg.state_dir
         os.makedirs(d, exist_ok=True)
-        state = {"model": self.model.to_dict(), "broker": self.broker.to_dict(),
-                 "pending": self.pending, "gate": list(self.gate),
-                 "scores": list(self.scores), "last_ms": self.last_ms,
-                 "equity_curve": self.equity_curve[-5000:]}
+        state = {"balance": self.balance, "open": self.open, "gate": list(self.gate),
+                 "log": self.log[-5000:], "trades": self.trades, "last_ms": self.last_ms,
+                 "last_price": self.last_price, "equity_curve": self.equity_curve[-5000:],
+                 "next_train_ms": self.next_train_ms, "trade_from_ms": self.trade_from_ms}
         tmp = os.path.join(d, "state.json.tmp")
         with open(tmp, "w") as f:
             json.dump(state, f)
         os.replace(tmp, os.path.join(d, "state.json"))
-        if self.broker.trades:
-            t = pd.DataFrame(self.broker.trades)
+        if self._dirty:   # training data and model only change when a candidate resolves
+            np.savez_compressed(os.path.join(d, "samples.npz"), X=np.asarray(self.X, np.float32),
+                                r=np.asarray(self.r), t=np.asarray(self.t, np.int64))
+            with open(os.path.join(d, "model.pkl"), "wb") as f:
+                pickle.dump(self.model, f)
+            self._dirty = False
+        if self.trades:
+            t = pd.DataFrame(self.trades)
             for c in ("entry_ms", "exit_ms"):
                 t[c] = pd.to_datetime(t[c], unit="ms", utc=True)
             t.to_csv(os.path.join(d, "trades.csv"), index=False)
 
     @classmethod
     def load(cls, cfg: Config):
-        path = os.path.join(cfg.state_dir, "state.json")
+        d = cfg.state_dir
+        path = os.path.join(d, "state.json")
         if not os.path.exists(path):
             return None
         with open(path) as f:
             s = json.load(f)
-        e = cls(cfg, s["model"]["n"])
-        e.model = OnlineLogit.from_dict(s["model"])
-        e.broker = PaperBroker.from_dict(s["broker"])
-        e.pending = s["pending"]
+        e = cls(cfg)
+        e.balance, e.open, e.trades = s["balance"], s["open"], s["trades"]
         e.gate.extend(s["gate"])
-        e.scores.extend(tuple(x) for x in s["scores"])
-        e.last_ms = s["last_ms"]
+        e.log = [tuple(l) for l in s["log"]]
+        e.last_ms, e.last_price = s["last_ms"], s["last_price"]
         e.equity_curve = [tuple(x) for x in s["equity_curve"]]
+        e.next_train_ms, e.trade_from_ms = s["next_train_ms"], s["trade_from_ms"]
+        z = np.load(os.path.join(d, "samples.npz"))
+        e.X, e.r, e.t = z["X"].tolist(), z["r"].tolist(), z["t"].tolist()
+        with open(os.path.join(d, "model.pkl"), "rb") as f:  # our own file, written by save()
+            e.model = pickle.load(f)
+        e._dirty = False
         return e

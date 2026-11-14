@@ -1,6 +1,8 @@
 """Candle download from the public Binance market-data API (no API key needed)."""
+import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import requests
@@ -33,16 +35,13 @@ def fetch_klines(symbol, tf, start_ms=None, end_ms=None, limit=1000):
     rows = []
     if start_ms is None:
         rows = _get({"symbol": symbol, "interval": tf, "limit": limit})
-    else:
-        cursor = start_ms
-        while cursor < end_ms:
-            batch = _get({"symbol": symbol, "interval": tf, "startTime": cursor, "limit": 1000})
-            if not batch:
-                break
-            rows.extend(batch)
-            cursor = batch[-1][0] + step
-            if len(batch) < 1000:
-                break
+    else:   # download 1000-candle chunks in parallel
+        chunk = 1000 * step
+        starts = range(int(start_ms), int(end_ms), chunk)
+        with ThreadPoolExecutor(8) as pool:
+            for batch in pool.map(lambda t: _get({"symbol": symbol, "interval": tf, "limit": 1000,
+                                                  "startTime": t, "endTime": t + chunk - 1}), starts):
+                rows.extend(batch)
     df = pd.DataFrame([r[:6] for r in rows], columns=COLUMNS).astype(float)
     df["open_ms"] = df["open_ms"].astype("int64")
     df["close_ms"] = df["open_ms"] + step
@@ -50,14 +49,32 @@ def fetch_klines(symbol, tf, start_ms=None, end_ms=None, limit=1000):
     return df.drop_duplicates("open_ms").sort_values("open_ms").reset_index(drop=True)
 
 
-def fetch_all(symbol, timeframes, days=None, limit=300):
-    """Candles for every timeframe. `days` of history, or the last `limit` candles."""
-    out = {}
-    now_ms = int(time.time() * 1000)
-    for tf in timeframes:
-        if days is None:
-            out[tf] = fetch_klines(symbol, tf, limit=limit)
-        else:
-            warmup = 150 * TF_MS[tf]  # extra candles so indicators are settled at the start
-            out[tf] = fetch_klines(symbol, tf, start_ms=now_ms - int(days * 86_400_000) - warmup)
-    return out
+def load_candles(symbol, tf, days, cache_dir="data"):
+    """`days` of closed candles (plus indicator warm-up), using and extending a local CSV cache."""
+    os.makedirs(cache_dir, exist_ok=True)
+    step = TF_MS[tf]
+    need_start = int(time.time() * 1000) - int(days * 86_400_000) - 150 * step
+    path = os.path.join(cache_dir, f"{symbol}_{tf}.csv")
+    meta_path = os.path.join(cache_dir, "_meta.json")
+    meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
+    key = f"{symbol}_{tf}"
+    cached = None
+    if os.path.exists(path) and meta.get(key, float("inf")) <= need_start:
+        cached = pd.read_csv(path)
+    start = int(cached["open_ms"].iloc[-1]) if cached is not None and len(cached) else need_start
+    new = fetch_klines(symbol, tf, start_ms=start)
+    df = new if cached is None else pd.concat([cached, new])
+    df = df.drop_duplicates("open_ms", keep="last").sort_values("open_ms").reset_index(drop=True)
+    df.to_csv(path, index=False)
+    meta[key] = min(meta.get(key, need_start), need_start) if cached is not None else need_start
+    json.dump(meta, open(meta_path, "w"))
+    return df[df["open_ms"] >= need_start].reset_index(drop=True)
+
+
+def fetch_recent(symbol, timeframes, limit=300):
+    """The last `limit` closed candles of every timeframe (for the live loop)."""
+    return {tf: fetch_klines(symbol, tf, limit=limit) for tf in timeframes}
+
+
+def load_history(symbol, timeframes, days, cache_dir="data"):
+    return {tf: load_candles(symbol, tf, days, cache_dir) for tf in timeframes}

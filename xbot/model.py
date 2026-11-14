@@ -1,47 +1,26 @@
-"""Online logistic regression: learns one sample at a time, never needs retraining."""
+"""Gradient-boosted trees that predict the net result (in R) of a setup.
+
+Trees can learn conditional relations a linear model cannot ("RSI 30 means something
+different at ADX 40 than at ADX 15"). The model is refitted periodically on all outcomes
+known so far, which is how the bot keeps learning.
+"""
 import numpy as np
+from sklearn.ensemble import HistGradientBoostingRegressor
 
 
-class OnlineLogit:
-    def __init__(self, n, lr=0.0003, l2=1e-2):
-        self.n, self.lr, self.l2 = n, lr, l2
-        self.w = np.zeros(n)
-        self.b = 0.0
-        self.mean = np.zeros(n)
-        self.var = np.ones(n)
-        self.seen = 0      # feature rows observed (for normalisation)
-        self.updates = 0   # labelled samples learned from
+class SetupModel:
+    def __init__(self):
+        self.reg = None
+        self.n_train = 0
 
-    def observe(self, x):
-        """Update the running feature normalisation (slowly forgets old regimes)."""
-        self.seen += 1
-        a = max(1.0 / self.seen, 1.0 / 5000)
-        d = x - self.mean
-        self.mean += a * d
-        self.var += a * (d * (x - self.mean) - self.var)
-
-    def _z(self, x):
-        return np.clip((x - self.mean) / np.sqrt(self.var + 1e-8), -5, 5)
+    def fit(self, X, r):
+        self.reg = HistGradientBoostingRegressor(
+            max_depth=3, max_iter=150, learning_rate=0.03, min_samples_leaf=100,
+            l2_regularization=1.0, random_state=0).fit(X, r)
+        self.n_train = len(r)
 
     def predict(self, x):
-        """Probability that the upper barrier is hit before the lower one."""
-        return float(1 / (1 + np.exp(-(self._z(x) @ self.w + self.b))))
-
-    def update(self, x, y, weight=1.0):
-        z = self._z(x)
-        g = (1 / (1 + np.exp(-(z @ self.w + self.b))) - y) * weight
-        self.w -= self.lr * (g * z + self.l2 * self.w)
-        self.b -= self.lr * g
-        self.updates += 1
-
-    def to_dict(self):
-        return {"n": self.n, "lr": self.lr, "l2": self.l2, "w": self.w.tolist(), "b": self.b,
-                "mean": self.mean.tolist(), "var": self.var.tolist(),
-                "seen": self.seen, "updates": self.updates}
-
-    @classmethod
-    def from_dict(cls, d):
-        m = cls(d["n"], d["lr"], d["l2"])
-        m.w, m.mean, m.var = np.array(d["w"]), np.array(d["mean"]), np.array(d["var"])
-        m.b, m.seen, m.updates = d["b"], d["seen"], d["updates"]
-        return m
+        """Expected net R of one candidate, or None while there is no model yet."""
+        if self.reg is None:
+            return None
+        return float(self.reg.predict(np.asarray(x, np.float32).reshape(1, -1))[0])

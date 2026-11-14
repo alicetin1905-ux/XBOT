@@ -2,12 +2,11 @@ import numpy as np
 import pandas as pd
 
 from xbot import indicators as ta
-from xbot.broker import PaperBroker
 from xbot.config import Config
 from xbot.data import TF_MS
 from xbot.engine import Engine
 from xbot.features import build_features, feature_columns
-from xbot.model import OnlineLogit
+from xbot.setups import find_setups, prepare_symbol
 
 
 def make_candles(tf, n_base=6000, seed=1):
@@ -53,52 +52,97 @@ def test_features_have_no_lookahead():
     np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-12)
 
 
-def test_model_learns_separable_problem():
-    rng = np.random.default_rng(0)
-    m = OnlineLogit(3, lr=0.05, l2=0.0)
-    for _ in range(4000):
-        x = rng.normal(size=3)
-        m.observe(x)
-        m.update(x, float(x[0] - x[1] > 0))
-    X = rng.normal(size=(500, 3))
-    acc = np.mean([(m.predict(x) > 0.5) == (x[0] - x[1] > 0) for x in X])
-    assert acc > 0.95
-    m2 = OnlineLogit.from_dict(m.to_dict())
-    assert m2.predict(X[0]) == m.predict(X[0])
+def prepared(n_base=6000, symbols=("AAA", "BBB")):
+    cfg = Config(symbols=symbols, min_train=30, horizon=24, retrain_hours=48)
+    out = {}
+    for k, sym in enumerate(symbols):
+        candles = {tf: make_candles(tf, n_base, seed=k + 1) for tf in cfg.timeframes}
+        out[sym] = prepare_symbol(candles, cfg)
+    return cfg, out
 
 
-def test_broker_long_target_and_short_stop():
-    b = PaperBroker(1000, fee=0.001, slippage=0)
-    b.open(1, 2, 100, sl=95, tp=110, bars=10, time_ms=0)
-    assert b.on_bar(105, 99, 104, 1) is None
-    t = b.on_bar(111, 104, 110, 2)
-    assert t["reason"] == "target"
-    assert abs(t["pnl"] - (20 - 0.2 - 0.22)) < 1e-9 and abs(b.balance - 1019.58) < 1e-9
-    b.open(-1, 1, 100, sl=105, tp=90, bars=10, time_ms=3)
-    t = b.on_bar(106, 89, 100, 4)  # both hit in one candle -> stop assumed
-    assert t["reason"] == "stop" and t["pnl"] < -5
-
-
-def test_broker_timeout():
-    b = PaperBroker(1000, fee=0, slippage=0)
-    b.open(1, 1, 100, sl=90, tp=110, bars=2, time_ms=0)
-    assert b.on_bar(101, 99, 100, 1) is None
-    assert b.on_bar(102, 99, 101, 2)["reason"] == "timeout"
-
-
-def test_engine_runs_and_roundtrips_state(tmp_path):
+def test_setups_are_sparse_and_mirrored():
     frame = build_features(all_candles())
-    cfg = Config(state_dir=str(tmp_path), min_train=200, horizon=24)
-    eng = Engine(cfg, len(feature_columns(frame)))
-    half = len(frame) // 2
-    eng.run_frame(frame.iloc[:half])
-    assert eng.model.updates > 0 and len(eng.pending) <= cfg.horizon
+    events = find_setups(frame, 48, 12)
+    assert 20 < len(events) < len(frame) / 10
+    assert {s for _, s, _ in events} <= {0, 1, 2} and {d for _, _, d in events} == {1, -1}
+    cfg, prep = prepared()
+    bars, ev = prep["AAA"]
+    cols = feature_columns(frame)
+    j = cols.index("f_1h_rsi")
+    for row, lst in ev.items():
+        for setup, side, x in lst:
+            assert len(x) == len(cols) + 4 and x[-1] == side and x[len(cols) + setup] == 1
+            assert np.isclose(x[j], side * build_row(frame, bars, row)[j], atol=1e-6)
+
+
+def build_row(frame, bars, row):
+    assert frame["close_ms"].iloc[row] == bars[row, 0]
+    return frame[feature_columns(frame)].iloc[row].to_numpy()
+
+
+def test_candidate_outcomes_and_trade_accounting():
+    cfg = Config(fee=0.001, slippage=0, min_train=10**9, gate_min_samples=0, gate_z=-1e9)
+    eng = Engine(cfg)
+    eng.model.predict = lambda x: 1.0          # always expect profit
+    eng.gate.extend([1.0])
+    x = np.zeros(3, np.float32)
+    # long at 100, ATR 2.5 -> barrier 5% -> sl 95, tp 105
+    out = eng.on_bar("AAA", 300_000, 101, 99, 100, 2.5, events=[(0, 1, x)])
+    pos = out["opened"][0]
+    assert pos["sl"] == 95 and abs(pos["tp"] - 105) < 1e-9
+    qty = pos["qty"]
+    assert abs(qty - 10_000 * 0.01 / (0.05 * 100)) < 1e-9   # stop costs 1% of equity
+    assert eng.on_bar("AAA", 600_000, 104, 99, 103, 2.5)["closed"] == []
+    t = eng.on_bar("AAA", 900_000, 106, 103, 105, 2.5)["closed"][0]
+    assert t["reason"] == "target"
+    assert abs(t["pnl"] - (qty * 5 - qty * 100 * 0.001 - qty * 105 * 0.001)) < 1e-9
+    assert abs(eng.balance - (10_000 + t["pnl"])) < 1e-9
+    assert abs(eng.r[0] - (0.05 - 0.002) / 0.05) < 1e-9
+    # short where stop and target fall in the same candle -> counted as a stop
+    eng.on_bar("AAA", 1_200_000, 101, 99, 100, 2.5, events=[(1, -1, x)])
+    t = eng.on_bar("AAA", 1_500_000, 106, 94, 100, 2.5)["closed"][0]
+    assert t["reason"] == "stop" and t["pnl"] < 0 and eng.r[1] < -1
+
+
+def test_no_trade_without_model_or_with_closed_gate():
+    eng = Engine(Config())
+    x = np.zeros(3, np.float32)
+    assert eng.on_bar("AAA", 300_000, 101, 99, 100, 2.5, events=[(0, 1, x)])["opened"] == []
+    eng.model.predict = lambda x: 1.0
+    assert eng.on_bar("AAA", 600_000, 101, 99, 100, 2.5, events=[(0, 1, x)])["opened"] == []
+    assert len(eng.open["AAA"]) == 2          # still followed as candidates to learn from
+
+
+def test_engine_learns_runs_and_roundtrips_state(tmp_path):
+    cfg, prep = prepared()
+    cfg.state_dir = str(tmp_path)
+    eng = Engine(cfg)
+    mid = int(prep["AAA"][0][len(prep["AAA"][0]) // 2, 0])
+    eng.run(prep, until_ms=mid)
+    assert eng.model.reg is not None and len(eng.r) > cfg.min_train
+    assert all(ms < mid for ms in eng.last_ms.values())
     eng.save()
     eng2 = Engine.load(cfg)
-    assert eng2.last_ms == eng.last_ms and eng2.model.updates == eng.model.updates
-    r1 = eng.run_frame(frame)
-    r2 = eng2.run_frame(frame)
-    assert len(r1) == len(frame) - half
-    assert [r["p"] for r in r1] == [r["p"] for r in r2]
-    assert eng.broker.balance == eng2.broker.balance
-    assert eng.run_frame(frame) == []  # nothing is processed twice
+    assert eng2.last_ms == eng.last_ms and len(eng2.r) == len(eng.r)
+    eng.run(prep)
+    eng2.run(prep)
+    assert len(eng.log) > 0
+    assert [l[4] for l in eng.log[-200:]] == [l[4] for l in eng2.log[-200:]]
+    assert eng.balance == eng2.balance and len(eng.r) == len(eng2.r)
+    assert eng.run(prep) == []                # nothing is processed twice
+
+
+def test_training_only_uses_resolved_candidates():
+    cfg, prep = prepared()
+    eng = Engine(cfg)
+    seen = []
+    orig = eng.retrain
+    def spy(now):
+        ok = orig(now)
+        if ok:
+            seen.append((now, max(eng.t)))
+        return ok
+    eng.retrain = spy
+    eng.run(prep)
+    assert seen and all(t_event < now for now, t_event in seen)

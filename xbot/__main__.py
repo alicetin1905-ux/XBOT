@@ -31,6 +31,8 @@ def _print_stats(eng, from_ms=0):
     print(f"  Trades            : {s['trades']}  | winrate {_f(s['win_rate'], '.1%')}"
           f" | profit factor {_f(s['profit_factor'], '.2f')}")
     print(f"  Max drawdown      : {s['max_drawdown_pct']:.2f}%")
+    print(f"  Orders            : {eng.cfg.order_type}"
+          + (f" | {s['fill_rate']:.0%} van de instap-orders gevuld" if eng.cfg.order_type == "limit" else ""))
     print(f"  Trainingsdata     : {s['samples']} afgeronde setups"
           f" (model getraind op {s['model_trained_on']})")
     print(f"  Zelfcontrole-gate : {'OPEN' if s['gate_open'] else 'DICHT'}"
@@ -114,9 +116,15 @@ def cmd_run(cfg, args):
                 for t in res["closed"]:
                     print(f"  SLUIT {sym} {t['side']} @ {t['exit']:.4g} ({t['reason']}) pnl {t['pnl']:+.2f}")
                 for o in res["opened"]:
-                    print(f"  OPEN  {sym} {'long' if o['side'] > 0 else 'short'} @ {o['entry_px']:.4g}"
+                    kind = "OPEN " if o["filled"] else "ORDER"
+                    print(f"  {kind} {sym} {'long' if o['side'] > 0 else 'short'} @ {o['entry_px']:.4g}"
                           f"  sl {o['sl']:.4g}  tp {o['tp']:.4g}  verwacht {o['p']:+.2f} R")
-            pos = ", ".join(f"{s} {'long' if e['side'] > 0 else 'short'}" for s, e in eng.positions())
+                for o in res["filled"]:
+                    print(f"  GEVULD {sym} {'long' if o['side'] > 0 else 'short'} @ {o['entry_px']:.4g}")
+                for o in res["cancelled"]:
+                    print(f"  VERVALLEN {sym} limit-order @ {o['entry_px']:.4g} (niet gevuld)")
+            pos = ", ".join(f"{s} {'long' if e['side'] > 0 else 'short'}"
+                            + ("" if e["filled"] else " (order)") for s, e in eng.positions())
             print(f"{_ts(max(eng.last_ms.values()))}  trend [{_trends(eng)}]")
             print(f"                  nieuwe setups {n_cand}"
                   f"  gate {'open' if eng.gate_open() else 'dicht'}"
@@ -138,7 +146,7 @@ def cmd_status(cfg, args):
     print(f"  Trend (30m/1H)    : {_trends(eng)}")
     _print_stats(eng, eng.trade_from_ms)
     for s, e in eng.positions():
-        print(f"  Open positie      : {s} {'long' if e['side'] > 0 else 'short'} {e['qty']:.5g}"
+        print(f"  {'Open positie ' if e['filled'] else 'Open order   '}     : {s} {'long' if e['side'] > 0 else 'short'} {e['qty']:.5g}"
               f" @ {e['entry_px']:.4g}  sl {e['sl']:.4g}  tp {e['tp']:.4g}")
     _print_trades(eng.trades, args.show)
 
@@ -152,6 +160,8 @@ def main():
     ap.add_argument("--risk", type=float, default=d.risk_per_trade,
                     help="risico per trade (fractie van equity)")
     ap.add_argument("--no-short", action="store_true")
+    ap.add_argument("--market", action="store_true",
+                    help="market-orders in plaats van limit-orders")
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("backtest", help="speel historie af; de bot leert en handelt onderweg")
     b.add_argument("--days", type=float, default=730)
@@ -169,7 +179,8 @@ def main():
     args = ap.parse_args()
     cfg = Config(symbols=tuple(args.symbols.split(",")), state_dir=args.state_dir,
                  start_balance=args.balance, risk_per_trade=args.risk,
-                 allow_short=not args.no_short)
+                 allow_short=not args.no_short,
+                 order_type="market" if args.market else "limit")
     if args.cmd == "backtest":
         cfg.holdout_days, cfg.retrain_hours = args.holdout_days, args.retrain_hours
     {"backtest": cmd_backtest, "run": cmd_run, "status": cmd_status}[args.cmd](cfg, args)

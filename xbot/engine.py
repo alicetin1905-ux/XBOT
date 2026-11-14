@@ -36,6 +36,7 @@ class Engine:
         self.equity_curve = []
         self.next_train_ms = 0
         self.trade_from_ms = 0    # no real trades before this time (learning only)
+        self.n_filled = self.n_unfilled = 0   # candidates whose entry order did / did not fill
         self._dirty = True
 
     # ---- account --------------------------------------------------------
@@ -44,7 +45,14 @@ class Engine:
 
     def equity(self):
         return self.balance + sum(e["side"] * e["qty"] * (self.last_price[s] - e["entry_px"])
-                                  for s, e in self.positions())
+                                  for s, e in self.positions() if e["filled"])
+
+    def _costs(self, reason=None):
+        """(fee rate, slippage) of the entry order, or of the exit order for `reason`."""
+        cfg = self.cfg
+        if cfg.order_type == "limit" and reason in (None, "target"):
+            return cfg.maker_fee, 0.0
+        return cfg.fee, cfg.slippage
 
     def gate_open(self):
         if len(self.gate) < self.cfg.gate_min_samples:
@@ -65,8 +73,9 @@ class Engine:
         return True
 
     def _finish(self, sym, e, exit_price, reason, now_ms, out):
-        cfg = self.cfg
-        r = (e["side"] * (exit_price / e["entry"] - 1) - cfg.round_trip_cost) / e["b"]
+        (fee_in, slip_in), (fee_out, slip_out) = self._costs(), self._costs(reason)
+        r = (e["side"] * (exit_price / e["entry"] - 1)
+             - (fee_in + slip_in + fee_out + slip_out)) / e["b"]
         self.X.append(e["x"]); self.r.append(r); self.t.append(e["t"])
         self._dirty = True
         if e["p"] is not None:
@@ -74,8 +83,8 @@ class Engine:
         if e["signal"]:
             self.gate.append(r)
         if e["qty"] > 0:
-            exit_px = exit_price * (1 - e["side"] * cfg.slippage)
-            exit_fee = e["qty"] * exit_px * cfg.fee
+            exit_px = exit_price * (1 - e["side"] * slip_out)
+            exit_fee = e["qty"] * exit_px * fee_out
             gross = e["side"] * e["qty"] * (exit_px - e["entry_px"])
             self.balance += gross - exit_fee
             trade = {"symbol": sym, "setup": SETUPS[e["setup"]],
@@ -83,7 +92,7 @@ class Engine:
                      "entry_ms": e["t"], "exit_ms": int(now_ms), "qty": e["qty"],
                      "entry": e["entry_px"], "exit": exit_px, "reason": reason,
                      "expected_r": e["p"],
-                     "pnl": gross - exit_fee - e["qty"] * e["entry_px"] * cfg.fee,
+                     "pnl": gross - exit_fee - e["qty"] * e["entry_px"] * fee_in,
                      "balance": self.balance}
             self.trades.append(trade)
             out["closed"].append(trade)
@@ -91,7 +100,7 @@ class Engine:
     # ---- one candle of one symbol ---------------------------------------
     def on_bar(self, sym, close_ms, high, low, close, atr, events=(), trade=True):
         cfg = self.cfg
-        out = {"closed": [], "opened": [], "candidates": []}
+        out = {"closed": [], "opened": [], "filled": [], "cancelled": [], "candidates": []}
         close_ms = int(close_ms)
         self.last_price[sym] = close
         self.last_ms[sym] = close_ms
@@ -102,6 +111,26 @@ class Engine:
             for e in running:
                 s = e["side"]
                 hit_sl = low <= e["sl"] if s > 0 else high >= e["sl"]
+                if not e["filled"]:   # limit entry: price has to trade through the order
+                    if low < e["entry"] if s > 0 else high > e["entry"]:
+                        e["filled"] = True
+                        self.n_filled += 1
+                        if e["qty"] > 0:
+                            self.balance -= e["qty"] * e["entry_px"] * self._costs()[0]
+                            out["filled"].append(e)
+                        if hit_sl:    # filled and stopped within the same candle
+                            self._finish(sym, e, e["sl"], "stop", close_ms, out)
+                        else:
+                            keep.append(e)
+                    else:
+                        e["wait"] -= 1
+                        if e["wait"] > 0:
+                            keep.append(e)
+                        else:         # not filled in time: order cancelled, nothing to learn
+                            self.n_unfilled += 1
+                            if e["qty"] > 0:
+                                out["cancelled"].append(e)
+                    continue
                 hit_tp = high >= e["tp"] if s > 0 else low <= e["tp"]
                 e["bars_left"] -= 1
                 if hit_sl:    # stop and target in the same candle: assume the stop came first
@@ -122,17 +151,22 @@ class Engine:
             b = cfg.barrier_atr * atr / close       # barrier distance as a fraction of price
             signal = bool(p is not None and p > cfg.min_edge_r
                           and (side > 0 or cfg.allow_short))
-            qty, entry_px = 0.0, close * (1 + side * cfg.slippage)
+            limit = cfg.order_type == "limit"
+            fee_in, slip_in = self._costs()
+            qty, entry_px = 0.0, close * (1 + side * slip_in)
             real = self.positions()
             if (trade and signal and close_ms >= self.trade_from_ms and self.gate_open()
                     and len(real) < cfg.max_positions and all(s != sym for s, _ in real)):
                 eq = self.equity()
                 qty = min(eq * cfg.risk_per_trade / (b * close), eq * cfg.max_leverage / close)
-                self.balance -= qty * entry_px * cfg.fee
+                if not limit:
+                    self.balance -= qty * entry_px * fee_in
+            self.n_filled += not limit
             e = {"x": [float(v) for v in x], "setup": int(setup), "side": int(side),
                  "entry": close, "b": b, "sl": close * (1 - side * b),
                  "tp": close * (1 + side * b), "bars_left": cfg.horizon, "p": p,
-                 "signal": signal, "t": close_ms, "qty": qty, "entry_px": entry_px}
+                 "signal": signal, "t": close_ms, "qty": qty, "entry_px": entry_px,
+                 "filled": not limit, "wait": cfg.entry_wait if limit else 0}
             self.open.setdefault(sym, []).append(e)
             out["candidates"].append(e)
             if qty > 0:
@@ -171,7 +205,7 @@ class Engine:
                 continue
             t = trade and (not trade_only_last or ms == latest)
             res = self.on_bar(s, *bars[int(row), :5], events=ev, trade=t)
-            if res["closed"] or res["opened"] or res["candidates"]:
+            if any(res.values()):
                 results.append((s, res))
         return results
 
@@ -189,6 +223,7 @@ class Engine:
             "win_rate": float((pnl > 0).mean()) if len(pnl) else None,
             "profit_factor": float(wins / losses) if losses > 0 else None,
             "max_drawdown_pct": float(((peak - eq) / peak).max()) * 100,
+            "fill_rate": self.n_filled / max(1, self.n_filled + self.n_unfilled),
             "samples": len(self.r),
             "model_trained_on": self.model.n_train,
             "gate_signals": len(self.gate),
@@ -229,7 +264,8 @@ class Engine:
         state = {"balance": self.balance, "open": self.open, "gate": list(self.gate),
                  "log": self.log[-5000:], "trades": self.trades, "last_ms": self.last_ms,
                  "last_price": self.last_price, "trend": self.trend, "equity_curve": self.equity_curve[-5000:],
-                 "next_train_ms": self.next_train_ms, "trade_from_ms": self.trade_from_ms}
+                 "next_train_ms": self.next_train_ms, "trade_from_ms": self.trade_from_ms,
+                 "n_filled": self.n_filled, "n_unfilled": self.n_unfilled}
         tmp = os.path.join(d, "state.json.tmp")
         with open(tmp, "w") as f:
             json.dump(state, f)
@@ -259,7 +295,12 @@ class Engine:
         e.gate.extend(s["gate"])
         e.log = [tuple(l) for l in s["log"]]
         e.last_ms, e.last_price = s["last_ms"], s["last_price"]
+        for lst in e.open.values():      # state written before limit orders existed
+            for c in lst:
+                c.setdefault("filled", True)
+                c.setdefault("wait", 0)
         e.trend = s.get("trend", {})
+        e.n_filled, e.n_unfilled = s.get("n_filled", 0), s.get("n_unfilled", 0)
         e.equity_curve = [tuple(x) for x in s["equity_curve"]]
         e.next_train_ms, e.trade_from_ms = s["next_train_ms"], s["trade_from_ms"]
         z = np.load(os.path.join(d, "samples.npz"))

@@ -90,7 +90,8 @@ def build_row(frame, bars, row):
 
 
 def test_candidate_outcomes_and_trade_accounting():
-    cfg = Config(fee=0.001, slippage=0, min_train=10**9, gate_min_samples=0, gate_z=-1e9)
+    cfg = Config(order_type="market", fee=0.001, slippage=0, min_train=10**9,
+                 gate_min_samples=0, gate_z=-1e9)
     eng = Engine(cfg)
     eng.model.predict = lambda x: 1.0          # always expect profit
     eng.gate.extend([1.0])
@@ -167,3 +168,41 @@ def test_deriv_features_use_only_past_data():
     assert np.isclose(f["f_fund"][1], 1.0)        # funding stamped exactly at the close is not used yet
     assert np.isnan(f["f_oi_chg_1h"][2])          # open interest too old -> missing, not stale
     assert deriv_features(q).isna().all().all()   # no futures data at all
+
+
+def limit_engine():
+    cfg = Config(order_type="limit", fee=0.001, maker_fee=0.0005, slippage=0.001, entry_wait=2,
+                 min_train=10**9, gate_min_samples=0, gate_z=-1e9)
+    eng = Engine(cfg)
+    eng.model.predict = lambda x: 1.0
+    eng.gate.extend([1.0])
+    return eng
+
+
+def test_limit_order_fills_only_when_traded_through():
+    eng, x = limit_engine(), np.zeros(3, np.float32)
+    out = eng.on_bar("AAA", 300_000, 101, 99, 100, 2.5, events=[(0, 1, x)])   # buy limit at 100
+    order = out["opened"][0]
+    assert not order["filled"] and eng.balance == 10_000 and eng.equity() == 10_000
+    assert eng.on_bar("AAA", 600_000, 102, 100, 101, 2.5)["filled"] == []     # only touched
+    assert len(eng.on_bar("AAA", 900_000, 101, 99.5, 100.5, 2.5)["filled"]) == 1
+    qty = order["qty"]
+    assert abs(eng.balance - (10_000 - qty * 100 * 0.0005)) < 1e-9            # maker fee, no slippage
+    t = eng.on_bar("AAA", 1_200_000, 106, 100, 105, 2.5)["closed"][0]         # target = limit order
+    assert t["reason"] == "target" and t["entry"] == 100 and abs(t["exit"] - 105) < 1e-9
+    assert abs(t["pnl"] - (qty * 5 - qty * 100 * 0.0005 - qty * 105 * 0.0005)) < 1e-9
+    assert abs(eng.r[0] - (0.05 - 0.001) / 0.05) < 1e-9
+    # a stop is a market order: taker fee and slippage
+    eng.on_bar("AAA", 1_500_000, 101, 99, 100, 2.5, events=[(0, 1, x)])
+    t = eng.on_bar("AAA", 1_800_000, 100.5, 94, 95, 2.5)["closed"][0]         # filled and stopped
+    assert t["reason"] == "stop" and abs(t["exit"] - 95 * 0.999) < 1e-9
+    assert abs(eng.r[1] - (-0.05 - 0.0005 - 0.002) / 0.05) < 1e-9
+
+
+def test_limit_order_expires_unfilled():
+    eng, x = limit_engine(), np.zeros(3, np.float32)
+    eng.on_bar("AAA", 300_000, 101, 99, 100, 2.5, events=[(0, -1, x)])        # sell limit at 100
+    assert eng.on_bar("AAA", 600_000, 100, 98, 99, 2.5)["cancelled"] == []
+    assert len(eng.on_bar("AAA", 900_000, 99, 97, 98, 2.5)["cancelled"]) == 1
+    assert eng.open["AAA"] == [] and eng.r == [] and eng.trades == []
+    assert eng.balance == 10_000 and eng.n_unfilled == 1

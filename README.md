@@ -16,7 +16,7 @@ python -m xbot status               # resultaten + laatste trades van de live bo
 ```
 
 Opties (vóór het subcommando): `--symbols BTCUSDT,ETHUSDT`, `--balance 5000`,
-`--risk 0.005`, `--no-short`, `--state-dir map`. Overige instellingen: `xbot/config.py`.
+`--risk 0.005`, `--no-short`, `--market`, `--state-dir map`. Overige instellingen: `xbot/config.py`.
 
 De eerste keer wordt de historie gedownload (±1 minuut per munt) en lokaal bewaard in
 `data/`; daarna worden alleen nieuwe candles opgehaald. `run` leert eerst een jaar
@@ -44,6 +44,10 @@ dus stoppen en herstarten kan gewoon.
 5. **Beoordelen** – een boommodel (gradient boosting, `xbot/model.py`) voorspelt per
    kandidaat het verwachte resultaat na kosten. Eén model voor alle munten.
 6. **Handelen** – alleen kandidaten met genoeg verwachte winst worden een paper trade.
+   De instap is een limit-order op de slotkoers van de signaalcandle; die telt alleen als
+   gevuld wanneer de koers er binnen 3 candles doorheen handelt, anders vervalt hij. Ook
+   het doel is een limit-order (maker-fee); stop en time-out zijn market-orders
+   (taker-fee plus slippage). Met `--market` gaat alles via market-orders.
    Stop-loss en take-profit liggen op `2 × ATR(1H)`; een stop kost 1% van de equity;
    maximaal 3 posities tegelijk, één per munt.
 7. **Leren** – élke kandidaat wordt gevolgd tot zijn uitkomst bekend is, ook als er niet
@@ -85,6 +89,10 @@ niet opnieuw gedraaid.
 Vervolgens is de trend naar 30m/1H verplaatst en de instap naar 5m/15m, alleen met de
 trend mee. Ontwikkelperiode: 15.076 kandidaten, gem. −0,060 R; door het model gekozen
 −0,073 R; 44 trades, −8,2%. Ook dit gaf geen edge na kosten.
+
+Met limit-orders dalen de kosten: alle kandidaten gemiddeld −0,040 R in plaats van −0,060 R,
+97% van de instap-orders gevuld. Het blijft negatief; doordat de zelfcontrole vaker
+openging werd er meer gehandeld: 226 trades, −11,5% (market-orders: 44 trades, −8,2%).
 
 Dit is dus een eerlijk testplatform, geen winstgevende strategie. Gebruik het niet met
 echt geld.

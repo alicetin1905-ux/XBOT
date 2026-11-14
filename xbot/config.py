@@ -17,9 +17,16 @@ class Config:
     breakout_lookback: int = 24  # base candles for the high/low channel (2 hours)
     setup_cooldown: int = 12     # a setup must have been absent this many candles to fire again
 
+    # Orders. "limit": entry is a limit order at the signal candle's close that must be
+    # traded through within `entry_wait` candles, otherwise it is cancelled; the target is
+    # a limit order too. Stops and timeouts are always market orders.
+    order_type: str = "limit"    # or "market"
+    entry_wait: int = 3
+
     # Costs (per side, as a fraction of notional)
-    fee: float = 0.0004
-    slippage: float = 0.0001
+    fee: float = 0.0004          # market orders (taker)
+    maker_fee: float = 0.0002    # limit orders (maker)
+    slippage: float = 0.0001     # market orders only
 
     # Paper account
     start_balance: float = 10_000.0
@@ -44,7 +51,3 @@ class Config:
 
     state_dir: str = "state"
     cache_dir: str = "data"
-
-    @property
-    def round_trip_cost(self) -> float:
-        return 2 * (self.fee + self.slippage)

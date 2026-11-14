@@ -40,7 +40,10 @@ dus stoppen en herstarten kan gewoon.
    mee (`xbot/setups.py`):
    - *breakout*: 5m-koers breekt uit zijn kanaal van 2 uur, in de richting van de trend;
    - *pullback*: 5m- of 15m-RSI zakt tegen de trend in;
-   - *reversal*: 15m-RSI extreem, alleen als er geen trend is.
+   - *reversal*: 15m-RSI extreem, alleen als er geen trend is;
+   - *fakeout*: de koers prikt tegen de trend in door het dieptepunt (of hoogtepunt) van
+     het laatste uur, hooguit 1,5× de 5m-ATR diep, en de 5m-candle sluit er meteen weer
+     boven (onder).
 5. **Beoordelen** – een boommodel (gradient boosting, `xbot/model.py`) voorspelt per
    kandidaat het verwachte resultaat na kosten. Eén model voor alle munten.
 6. **Handelen** – alleen kandidaten met genoeg verwachte winst worden een paper trade.
@@ -93,6 +96,11 @@ trend mee. Ontwikkelperiode: 15.076 kandidaten, gem. −0,060 R; door het model 
 Met limit-orders dalen de kosten: alle kandidaten gemiddeld −0,040 R in plaats van −0,060 R,
 97% van de instap-orders gevuld. Het blijft negatief; doordat de zelfcontrole vaker
 openging werd er meer gehandeld: 226 trades, −11,5% (market-orders: 44 trades, −8,2%).
+
+De fakeout-setup (valse uitbraak tegen de trend in) gaf 14.023 kandidaten met gemiddeld
+−0,050 R; door het model gekozen −0,081 R. Met een krappe stop net voorbij de prik is het
+resultaat vóór kosten ongeveer nul en na kosten ongeveer −0,3 R, omdat de kosten dan zwaar
+wegen tegenover de kleine stopafstand (mediaan 0,25%).
 
 Dit is dus een eerlijk testplatform, geen winstgevende strategie. Gebruik het niet met
 echt geld.

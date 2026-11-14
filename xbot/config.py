@@ -15,6 +15,8 @@ class Config:
 
     # Setup detection
     breakout_lookback: int = 24  # base candles for the high/low channel (2 hours)
+    fakeout_lookback: int = 12   # base candles (1 hour) whose low/high a fakeout pokes through
+    fakeout_depth_atr: float = 1.5  # max depth of that poke, in 5m ATRs
     setup_cooldown: int = 12     # a setup must have been absent this many candles to fire again
 
     # Orders. "limit": entry is a limit order at the signal candle's close that must be

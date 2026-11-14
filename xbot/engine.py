@@ -265,7 +265,8 @@ class Engine:
                  "log": self.log[-5000:], "trades": self.trades, "last_ms": self.last_ms,
                  "last_price": self.last_price, "trend": self.trend, "equity_curve": self.equity_curve[-5000:],
                  "next_train_ms": self.next_train_ms, "trade_from_ms": self.trade_from_ms,
-                 "n_filled": self.n_filled, "n_unfilled": self.n_unfilled}
+                 "n_filled": self.n_filled, "n_unfilled": self.n_unfilled,
+                 "setups": list(SETUPS)}
         tmp = os.path.join(d, "state.json.tmp")
         with open(tmp, "w") as f:
             json.dump(state, f)
@@ -290,6 +291,9 @@ class Engine:
             return None
         with open(path) as f:
             s = json.load(f)
+        if s.get("setups") != list(SETUPS):
+            print("Opgeslagen state hoort bij een oudere versie (andere setups): opnieuw leren.")
+            return None
         e = cls(cfg)
         e.balance, e.open, e.trades = s["balance"], s["open"], s["trades"]
         e.gate.extend(s["gate"])

@@ -68,7 +68,7 @@ def test_setups_are_sparse_and_mirrored():
     frame = build_features(all_candles())
     events = find_setups(frame, 24, 12)
     assert 20 < len(events) < len(frame) / 10
-    assert {s for _, s, _ in events} <= {0, 1, 2} and {d for _, _, d in events} == {1, -1}
+    assert {s for _, s, _ in events} <= {0, 1, 2, 3} and {d for _, _, d in events} == {1, -1}
     tr = trend(frame).to_numpy()
     assert set(tr) == {-1, 0, 1}
     for row, setup, side in events:     # trend setups only go with the trend
@@ -80,7 +80,7 @@ def test_setups_are_sparse_and_mirrored():
     j = cols.index("f_1h_rsi")
     for row, lst in ev.items():
         for setup, side, x in lst:
-            assert len(x) == len(cols) + 4 and x[-1] == side and x[len(cols) + setup] == 1
+            assert len(x) == len(cols) + 5 and x[-1] == side and x[len(cols) + setup] == 1
             assert np.isclose(x[j], side * build_row(frame, bars, row)[j], atol=1e-6)
 
 
@@ -206,3 +206,27 @@ def test_limit_order_expires_unfilled():
     assert len(eng.on_bar("AAA", 900_000, 99, 97, 98, 2.5)["cancelled"]) == 1
     assert eng.open["AAA"] == [] and eng.r == [] and eng.trades == []
     assert eng.balance == 10_000 and eng.n_unfilled == 1
+
+
+def fake_frame(lows, closes, opens, trend_sign=1):
+    n = len(lows)
+    f = pd.DataFrame({"open": opens, "high": np.maximum(opens, closes) + 0.1, "low": lows,
+                      "close": closes, "atr_5m": 1.0, "f_5m_rsi": 0.0, "f_15m_rsi": 0.0})
+    for c in ("f_30m_ema_cross", "f_30m_di_diff", "f_1h_ema_cross", "f_1h_di_diff"):
+        f[c] = 0.1 * trend_sign
+    return f
+
+
+def test_fakeout_fires_on_small_false_break_with_trend_only():
+    n = 30
+    lows, opens, closes = np.full(n, 100.0), np.full(n, 100.5), np.full(n, 100.6)
+    lows[20], opens[20], closes[20] = 99.5, 100.4, 99.8     # breaks the 100 low, closes below
+    lows[21], opens[21], closes[21] = 99.7, 99.8, 100.7     # next candle snaps back above 100
+    fakes = lambda f, **kw: [(r, d) for r, s, d in find_setups(f, **kw) if s == 3]
+    assert fakes(fake_frame(lows, closes, opens)) == [(21, 1)]
+    assert fakes(fake_frame(lows, closes, opens, trend_sign=-1)) == []   # not against the trend
+    deep = lows.copy(); deep[20] = 97.0                                  # 3 ATR: a real break
+    assert fakes(fake_frame(deep, closes, opens)) == []
+    wick = lows.copy(); wick[20], wick[21] = 100.0, 99.6                 # one-candle wick
+    c2, o2 = closes.copy(), opens.copy(); c2[20], o2[21] = 100.6, 100.2
+    assert fakes(fake_frame(wick, c2, o2)) == [(21, 1)]

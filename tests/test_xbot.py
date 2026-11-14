@@ -4,6 +4,7 @@ import pandas as pd
 from xbot import indicators as ta
 from xbot.config import Config
 from xbot.data import TF_MS
+from xbot.derivs import deriv_features
 from xbot.engine import Engine
 from xbot.features import build_features, feature_columns
 from xbot.setups import find_setups, prepare_symbol
@@ -18,10 +19,12 @@ def make_candles(tf, n_base=6000, seed=1):
                        "high": np.maximum(open_, close) * 1.001,
                        "low": np.minimum(open_, close) * 0.999,
                        "close": close, "volume": rng.uniform(1, 10, n_base)})
+    df["taker_buy"] = df["volume"] * rng.uniform(0.3, 0.7, n_base)
     k = TF_MS[tf] // 300_000
     g = df.groupby(df.index // k).agg(open_ms=("open_ms", "first"), open=("open", "first"),
                                       high=("high", "max"), low=("low", "min"),
-                                      close=("close", "last"), volume=("volume", "sum"))
+                                      close=("close", "last"), volume=("volume", "sum"),
+                                      taker_buy=("taker_buy", "sum"))
     g["close_ms"] = g["open_ms"] + TF_MS[tf]
     return g.reset_index(drop=True)
 
@@ -48,7 +51,7 @@ def test_features_have_no_lookahead():
     cols = feature_columns(full)
     a = full[full["close_ms"] == cut_ms][cols].to_numpy()
     b = part[part["close_ms"] == cut_ms][cols].to_numpy()
-    assert len(cols) == 13 * 5 + 2
+    assert len(cols) == 15 * 5 + 2 + 5
     np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-12)
 
 
@@ -146,3 +149,16 @@ def test_training_only_uses_resolved_candidates():
     eng.retrain = spy
     eng.run(prep)
     assert seen and all(t_event < now for now, t_event in seen)
+
+
+def test_deriv_features_use_only_past_data():
+    oi = pd.DataFrame({"ms": np.arange(0, 400) * 300_000, "oi": 1000.0 + np.arange(400)})
+    fund = pd.DataFrame({"ms": [0, 8 * 3_600_000], "rate": [0.0001, -0.0002]})
+    q = np.array([13 * 3_600_000, 8 * 3_600_000, 33 * 3_600_000 + 16 * 60_000 + 300_000 * 3])
+    f = deriv_features(q, {"oi": [oi], "fund": fund})
+    # at 13:00 the newest usable snapshot is 12:55 (row 155); one hour earlier is row 143
+    assert np.isclose(f["f_oi_chg_1h"][0], np.log(1155 / 1143))
+    assert np.isclose(f["f_fund"][0], -2.0)
+    assert np.isclose(f["f_fund"][1], 1.0)        # funding stamped exactly at the close is not used yet
+    assert np.isnan(f["f_oi_chg_1h"][2])          # open interest too old -> missing, not stale
+    assert deriv_features(q).isna().all().all()   # no futures data at all

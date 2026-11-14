@@ -14,6 +14,8 @@ class SetupModel:
         self.n_train = 0
 
     def fit(self, X, r):
+        X = np.array(X, np.float32)
+        X[:, np.isnan(X).all(axis=0)] = 0   # a feature without any data cannot be binned
         self.reg = HistGradientBoostingRegressor(
             max_depth=3, max_iter=150, learning_rate=0.03, min_samples_leaf=100,
             l2_regularization=1.0, random_state=0).fit(X, r)

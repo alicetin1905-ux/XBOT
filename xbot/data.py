@@ -9,7 +9,7 @@ import requests
 
 BASE_URL = os.environ.get("XBOT_API", "https://data-api.binance.vision")
 TF_MS = {"5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000}
-COLUMNS = ["open_ms", "open", "high", "low", "close", "volume"]
+COLUMNS = ["open_ms", "open", "high", "low", "close", "volume", "taker_buy"]
 
 
 def _get(params, retries=4):
@@ -42,7 +42,7 @@ def fetch_klines(symbol, tf, start_ms=None, end_ms=None, limit=1000):
             for batch in pool.map(lambda t: _get({"symbol": symbol, "interval": tf, "limit": 1000,
                                                   "startTime": t, "endTime": t + chunk - 1}), starts):
                 rows.extend(batch)
-    df = pd.DataFrame([r[:6] for r in rows], columns=COLUMNS).astype(float)
+    df = pd.DataFrame([r[:6] + [r[9]] for r in rows], columns=COLUMNS).astype(float)
     df["open_ms"] = df["open_ms"].astype("int64")
     df["close_ms"] = df["open_ms"] + step
     df = df[df["close_ms"] <= end_ms]  # drop the candle that is still forming
@@ -61,6 +61,8 @@ def load_candles(symbol, tf, days, cache_dir="data"):
     cached = None
     if os.path.exists(path) and meta.get(key, float("inf")) <= need_start:
         cached = pd.read_csv(path)
+        if list(cached.columns[:len(COLUMNS)]) != COLUMNS:   # cache from an older version
+            cached = None
     start = int(cached["open_ms"].iloc[-1]) if cached is not None and len(cached) else need_start
     new = fetch_klines(symbol, tf, start_ms=start)
     df = new if cached is None else pd.concat([cached, new])

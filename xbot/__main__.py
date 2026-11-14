@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .config import Config
 from .data import TF_MS, fetch_recent, load_history
+from .derivs import fetch_derivs_recent, load_derivs_history
 from .engine import Engine
 from .setups import prepare_symbol
 
@@ -49,8 +50,17 @@ def _print_trades(trades, n):
 
 def _history(cfg, days):
     print(f"Candles laden: {', '.join(cfg.symbols)} | {', '.join(cfg.timeframes)} | {days:g} dagen")
-    return {s: prepare_symbol(load_history(s, cfg.timeframes, days, cfg.cache_dir), cfg)
+    return {s: prepare_symbol(load_history(s, cfg.timeframes, days, cfg.cache_dir), cfg,
+                              load_derivs_history(s, days, cfg.cache_dir))
             for s in cfg.symbols}
+
+
+def _live_derivs(symbol):
+    try:
+        return fetch_derivs_recent(symbol)
+    except Exception as exc:   # the bot keeps running on candle features alone
+        print(f"  ({symbol}: futures-data niet beschikbaar: {exc!r})")
+        return None
 
 
 def cmd_backtest(cfg, args):
@@ -91,7 +101,8 @@ def cmd_run(cfg, args):
     step = TF_MS[cfg.base_tf] / 1000
     while True:
         try:
-            prepared = {s: prepare_symbol(fetch_recent(s, cfg.timeframes), cfg) for s in cfg.symbols}
+            prepared = {s: prepare_symbol(fetch_recent(s, cfg.timeframes), cfg, _live_derivs(s))
+                        for s in cfg.symbols}
             n_cand = 0
             for sym, res in eng.run(prepared, trade=True, trade_only_last=True):
                 n_cand += len(res["candidates"])

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from . import indicators as ta
+from .derivs import deriv_features
 
 
 def tf_features(df, tf):
@@ -17,6 +18,7 @@ def tf_features(df, tf):
     ema20, ema50 = ta.ema(c, 20), ta.ema(c, 50)
     vol_ma = v.rolling(20).mean().replace(0, np.nan)
     rng = (h - l).replace(0, np.nan)
+    buy = (df["taker_buy"] / v.replace(0, np.nan) - 0.5).fillna(0)  # share of aggressive buying
     p = f"f_{tf}_"
     out = pd.DataFrame({
         "close_ms": df["close_ms"],
@@ -33,12 +35,14 @@ def tf_features(df, tf):
         p + "ret1": c.diff() / atr,
         p + "ret3": c.diff(3) / atr,
         p + "body": ((c - o) / rng).fillna(0),
+        p + "buy": buy,
+        p + "buy_ma": buy.rolling(10).mean(),
         f"atr_{tf}": atr,
     })
     return out
 
 
-def build_features(candles, base_tf="5m", atr_tf="1h"):
+def build_features(candles, base_tf="5m", atr_tf="1h", derivs=None):
     """candles: {tf: DataFrame from data.fetch_klines}. Returns one row per base candle."""
     base = candles[base_tf]
     frame = base[["close_ms", "open", "high", "low", "close", "volume"]].copy()
@@ -49,7 +53,8 @@ def build_features(candles, base_tf="5m", atr_tf="1h"):
     frame["f_hour_cos"] = np.cos(2 * np.pi * hour / 24)
     frame["atr_ref"] = frame[f"atr_{atr_tf}"]
     frame = frame.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
-    return frame
+    # futures features may be missing (NaN) without dropping the candle
+    return pd.concat([frame, deriv_features(frame["close_ms"], derivs)], axis=1)
 
 
 def feature_columns(frame):

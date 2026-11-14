@@ -10,7 +10,8 @@ from .features import build_features, feature_columns
 SETUPS = ("breakout", "reversal", "pullback")
 # Features whose sign means "up" vs "down"; they are mirrored for short candidates so that
 # "with the trend" looks the same to the model for longs and shorts.
-DIRECTIONAL = ("rsi", "di_diff", "ema_dist", "ema_cross", "macd", "bb", "ret1", "ret3", "body")
+DIRECTIONAL = ("rsi", "di_diff", "ema_dist", "ema_cross", "macd", "bb", "ret1", "ret3", "body",
+               "buy", "buy_ma", "fund", "fund_avg")
 
 
 def find_setups(frame, lookback=48, cooldown=12):
@@ -45,13 +46,13 @@ def event_feature_names(cols):
     return list(cols) + [f"setup_{s}" for s in SETUPS] + ["side"]
 
 
-def prepare_symbol(candles, cfg):
+def prepare_symbol(candles, cfg, derivs=None):
     """Candles of one symbol -> (bars, events).
 
     bars:   array [close_ms, high, low, close, atr] per base candle
     events: {row: [(setup_index, side, feature_vector), ...]}
     """
-    frame = build_features(candles, cfg.base_tf, cfg.atr_tf)
+    frame = build_features(candles, cfg.base_tf, cfg.atr_tf, derivs)
     cols = feature_columns(frame)
     mirror = np.array([any(c.endswith("_" + d) for d in DIRECTIONAL) for c in cols])
     X = frame[cols].to_numpy(np.float32)

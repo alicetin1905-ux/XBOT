@@ -28,8 +28,11 @@ dus stoppen en herstarten kan gewoon.
 1. **Candles uitlezen** – per munt en timeframe de gesloten candles (`xbot/data.py`).
 2. **Analyseren** – per timeframe 13 kenmerken (`xbot/features.py`): RSI, ADX, +DI/−DI,
    volume t.o.v. gemiddelde, volumetrend, afstand tot EMA50, EMA20/50-kruising, MACD,
-   Bollinger %B, ATR%, momentum en candle-body. Hogere timeframes tellen pas mee als hun
-   candle gesloten is.
+   Bollinger %B, ATR%, momentum, candle-body en het aandeel agressieve kopers in het
+   volume. Hogere timeframes tellen pas mee als hun candle gesloten is. Daarbij komen
+   futures-kenmerken (`xbot/derivs.py`): verandering in open interest over 1, 4 en 24 uur
+   en de funding rate. Historie komt uit de Binance-bulkbestanden, live uit de
+   Binance-futures-API of, waar die niet bereikbaar is, OKX.
 3. **Setups zoeken** – vaste regels leveren kandidaat-trades (`xbot/setups.py`):
    - *breakout*: prijs breekt uit zijn 4-uurs kanaal, met een trendende 1H-chart mee;
    - *reversal*: 15m-RSI extreem terwijl de 1H-chart niet trendt;
@@ -69,6 +72,11 @@ Getest op 2 jaar historie van BTC, ETH, SOL, BNB en XRP (ruim 15.000 setups).
   geen edge.
 - Het model voegt geen betrouwbare selectie toe (correlatie voorspeld/werkelijk rond 0).
 - De zelfcontrole doet wat hij moet doen: de bot bleef bijna volledig uit de markt.
+
+Daarna zijn futures-kenmerken (open interest, funding) en de koop/verkoop-verhouding
+toegevoegd. Op de ontwikkelperiode veranderde dat niets wezenlijks: gekozen kandidaten
+−0,081 R tegenover −0,078 R voor alle kandidaten, 15 trades, −4,2%. De holdout is daarvoor
+niet opnieuw gedraaid.
 
 Dit is dus een eerlijk testplatform, geen winstgevende strategie. Gebruik het niet met
 echt geld.

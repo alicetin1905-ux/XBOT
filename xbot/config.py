@@ -14,7 +14,7 @@ class Config:
     horizon: int = 96            # 96 x 5m = 8 hours
 
     # Setup detection
-    breakout_lookback: int = 48  # base candles for the high/low channel
+    breakout_lookback: int = 24  # base candles for the high/low channel (2 hours)
     setup_cooldown: int = 12     # a setup must have been absent this many candles to fire again
 
     # Costs (per side, as a fraction of notional)

@@ -33,19 +33,23 @@ dus stoppen en herstarten kan gewoon.
    futures-kenmerken (`xbot/derivs.py`): verandering in open interest over 1, 4 en 24 uur
    en de funding rate. Historie komt uit de Binance-bulkbestanden, live uit de
    Binance-futures-API of, waar die niet bereikbaar is, OKX.
-3. **Setups zoeken** – vaste regels leveren kandidaat-trades (`xbot/setups.py`):
-   - *breakout*: prijs breekt uit zijn 4-uurs kanaal, met een trendende 1H-chart mee;
-   - *reversal*: 15m-RSI extreem terwijl de 1H-chart niet trendt;
-   - *pullback*: dip tegen een 4H-trend in.
-4. **Beoordelen** – een boommodel (gradient boosting, `xbot/model.py`) voorspelt per
+3. **Trend bepalen** – per munt op de 30m- en 1H-chart: *uptrend* als op beide EMA20 boven
+   EMA50 ligt en +DI boven −DI, *downtrend* bij het omgekeerde, anders *zijwaarts*. De
+   trend staat in de live-uitvoer en in `status`.
+4. **Setups zoeken** – instappen komen van de 5m- en 15m-chart en gaan alleen met de trend
+   mee (`xbot/setups.py`):
+   - *breakout*: 5m-koers breekt uit zijn kanaal van 2 uur, in de richting van de trend;
+   - *pullback*: 5m- of 15m-RSI zakt tegen de trend in;
+   - *reversal*: 15m-RSI extreem, alleen als er geen trend is.
+5. **Beoordelen** – een boommodel (gradient boosting, `xbot/model.py`) voorspelt per
    kandidaat het verwachte resultaat na kosten. Eén model voor alle munten.
-5. **Handelen** – alleen kandidaten met genoeg verwachte winst worden een paper trade.
+6. **Handelen** – alleen kandidaten met genoeg verwachte winst worden een paper trade.
    Stop-loss en take-profit liggen op `2 × ATR(1H)`; een stop kost 1% van de equity;
    maximaal 3 posities tegelijk, één per munt.
-6. **Leren** – élke kandidaat wordt gevolgd tot zijn uitkomst bekend is, ook als er niet
+7. **Leren** – élke kandidaat wordt gevolgd tot zijn uitkomst bekend is, ook als er niet
    op gehandeld is. Het model wordt periodiek opnieuw getraind op alle bekende uitkomsten
    van het afgelopen jaar.
-7. **Zelfcontrole** – de bot handelt alleen zolang zijn eigen laatste 200 signalen na
+8. **Zelfcontrole** – de bot handelt alleen zolang zijn eigen laatste 200 signalen na
    kosten aantoonbaar winstgevend waren ("gate").
 
 ## Eerlijk testen
@@ -77,6 +81,10 @@ Daarna zijn futures-kenmerken (open interest, funding) en de koop/verkoop-verhou
 toegevoegd. Op de ontwikkelperiode veranderde dat niets wezenlijks: gekozen kandidaten
 −0,081 R tegenover −0,078 R voor alle kandidaten, 15 trades, −4,2%. De holdout is daarvoor
 niet opnieuw gedraaid.
+
+Vervolgens is de trend naar 30m/1H verplaatst en de instap naar 5m/15m, alleen met de
+trend mee. Ontwikkelperiode: 15.076 kandidaten, gem. −0,060 R; door het model gekozen
+−0,073 R; 44 trades, −8,2%. Ook dit gaf geen edge na kosten.
 
 Dit is dus een eerlijk testplatform, geen winstgevende strategie. Gebruik het niet met
 echt geld.

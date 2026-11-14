@@ -16,6 +16,11 @@ def _ts(ms):
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
+def _trends(eng):
+    names = {1: "uptrend", -1: "downtrend", 0: "zijwaarts"}
+    return ", ".join(f"{s.replace('USDT', '')} {names[t]}" for s, t in eng.trend.items())
+
+
 def _f(v, fmt):
     return "-" if v is None else format(v, fmt)
 
@@ -112,7 +117,8 @@ def cmd_run(cfg, args):
                     print(f"  OPEN  {sym} {'long' if o['side'] > 0 else 'short'} @ {o['entry_px']:.4g}"
                           f"  sl {o['sl']:.4g}  tp {o['tp']:.4g}  verwacht {o['p']:+.2f} R")
             pos = ", ".join(f"{s} {'long' if e['side'] > 0 else 'short'}" for s, e in eng.positions())
-            print(f"{_ts(max(eng.last_ms.values()))}  nieuwe setups {n_cand}"
+            print(f"{_ts(max(eng.last_ms.values()))}  trend [{_trends(eng)}]")
+            print(f"                  nieuwe setups {n_cand}"
                   f"  gate {'open' if eng.gate_open() else 'dicht'}"
                   f"  posities [{pos or '-'}]  equity {eng.equity():.2f}", flush=True)
             eng.save()
@@ -129,6 +135,7 @@ def cmd_status(cfg, args):
         print("Nog geen state. Start eerst: python -m xbot run")
         return
     print(f"Laatste candle {_ts(max(eng.last_ms.values()))} UTC")
+    print(f"  Trend (30m/1H)    : {_trends(eng)}")
     _print_stats(eng, eng.trade_from_ms)
     for s, e in eng.positions():
         print(f"  Open positie      : {s} {'long' if e['side'] > 0 else 'short'} {e['qty']:.5g}"

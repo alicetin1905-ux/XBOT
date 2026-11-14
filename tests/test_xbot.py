@@ -7,7 +7,7 @@ from xbot.data import TF_MS
 from xbot.derivs import deriv_features
 from xbot.engine import Engine
 from xbot.features import build_features, feature_columns
-from xbot.setups import find_setups, prepare_symbol
+from xbot.setups import find_setups, prepare_symbol, trend
 
 
 def make_candles(tf, n_base=6000, seed=1):
@@ -66,11 +66,16 @@ def prepared(n_base=6000, symbols=("AAA", "BBB")):
 
 def test_setups_are_sparse_and_mirrored():
     frame = build_features(all_candles())
-    events = find_setups(frame, 48, 12)
+    events = find_setups(frame, 24, 12)
     assert 20 < len(events) < len(frame) / 10
     assert {s for _, s, _ in events} <= {0, 1, 2} and {d for _, _, d in events} == {1, -1}
+    tr = trend(frame).to_numpy()
+    assert set(tr) == {-1, 0, 1}
+    for row, setup, side in events:     # trend setups only go with the trend
+        assert tr[row] == (0 if setup == 1 else side)
     cfg, prep = prepared()
     bars, ev = prep["AAA"]
+    assert (bars[:, 5] == tr).all()
     cols = feature_columns(frame)
     j = cols.index("f_1h_rsi")
     for row, lst in ev.items():

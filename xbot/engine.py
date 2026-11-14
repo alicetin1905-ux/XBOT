@@ -32,6 +32,7 @@ class Engine:
         self.trades = []
         self.last_ms = {}
         self.last_price = {}
+        self.trend = {}           # symbol -> +1 uptrend, -1 downtrend, 0 sideways (30m/1h)
         self.equity_curve = []
         self.next_train_ms = 0
         self.trade_from_ms = 0    # no real trades before this time (learning only)
@@ -163,12 +164,13 @@ class Engine:
             s = syms[int(k)]
             bars, events = prepared[s]
             ev = events.get(int(row), ())
+            self.trend[s] = int(bars[int(row), 5])
             if not ev and not self.open.get(s) and ms % HOUR:
                 self.last_ms[s] = int(ms)
                 self.last_price[s] = bars[int(row), 3]
                 continue
             t = trade and (not trade_only_last or ms == latest)
-            res = self.on_bar(s, *bars[int(row)], events=ev, trade=t)
+            res = self.on_bar(s, *bars[int(row), :5], events=ev, trade=t)
             if res["closed"] or res["opened"] or res["candidates"]:
                 results.append((s, res))
         return results
@@ -226,7 +228,7 @@ class Engine:
         os.makedirs(d, exist_ok=True)
         state = {"balance": self.balance, "open": self.open, "gate": list(self.gate),
                  "log": self.log[-5000:], "trades": self.trades, "last_ms": self.last_ms,
-                 "last_price": self.last_price, "equity_curve": self.equity_curve[-5000:],
+                 "last_price": self.last_price, "trend": self.trend, "equity_curve": self.equity_curve[-5000:],
                  "next_train_ms": self.next_train_ms, "trade_from_ms": self.trade_from_ms}
         tmp = os.path.join(d, "state.json.tmp")
         with open(tmp, "w") as f:
@@ -257,6 +259,7 @@ class Engine:
         e.gate.extend(s["gate"])
         e.log = [tuple(l) for l in s["log"]]
         e.last_ms, e.last_price = s["last_ms"], s["last_price"]
+        e.trend = s.get("trend", {})
         e.equity_curve = [tuple(x) for x in s["equity_curve"]]
         e.next_train_ms, e.trade_from_ms = s["next_train_ms"], s["trade_from_ms"]
         z = np.load(os.path.join(d, "samples.npz"))

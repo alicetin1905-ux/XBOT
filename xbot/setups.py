@@ -14,25 +14,40 @@ DIRECTIONAL = ("rsi", "di_diff", "ema_dist", "ema_cross", "macd", "bb", "ret1", 
                "buy", "buy_ma", "fund", "fund_avg")
 
 
-def find_setups(frame, lookback=48, cooldown=12):
-    """Returns a list of (row, setup_index, side) sorted by row."""
+def trend(frame):
+    """Trend per base candle from the 30m and 1h charts: +1 up, -1 down, 0 sideways.
+
+    Up means that on both charts EMA20 is above EMA50 and +DI is above -DI.
+    """
+    up = ((frame["f_30m_ema_cross"] > 0) & (frame["f_30m_di_diff"] > 0)
+          & (frame["f_1h_ema_cross"] > 0) & (frame["f_1h_di_diff"] > 0))
+    dn = ((frame["f_30m_ema_cross"] < 0) & (frame["f_30m_di_diff"] < 0)
+          & (frame["f_1h_ema_cross"] < 0) & (frame["f_1h_di_diff"] < 0))
+    return up.astype(int) - dn.astype(int)
+
+
+def find_setups(frame, lookback=24, cooldown=12):
+    """Returns a list of (row, setup_index, side) sorted by row.
+
+    Entries come from the 5m and 15m charts and only go with the 30m/1h trend;
+    without a trend only the reversal setup is allowed.
+    """
     c = frame["close"]
     chan_hi = frame["high"].rolling(lookback).max().shift(1)
     chan_lo = frame["low"].rolling(lookback).min().shift(1)
-    adx1h, di1h = frame["f_1h_adx"], frame["f_1h_di_diff"]
-    rsi15 = frame["f_15m_rsi"]
-    up4h = (frame["f_4h_ema_cross"] > 0) & (frame["f_4h_di_diff"] > 0)
-    dn4h = (frame["f_4h_ema_cross"] < 0) & (frame["f_4h_di_diff"] < 0)
+    rsi5, rsi15 = frame["f_5m_rsi"], frame["f_15m_rsi"]
+    tr = trend(frame)
+    up, dn, flat = tr > 0, tr < 0, tr == 0
     conds = [
-        # breakout: price leaves its 4-hour channel in the direction of a trending 1h chart
-        (0, 1, (c > chan_hi) & (adx1h > 0.20) & (di1h > 0)),
-        (0, -1, (c < chan_lo) & (adx1h > 0.20) & (di1h < 0)),
-        # reversal: 15m RSI extreme while the 1h chart is not trending
-        (1, 1, (rsi15 < -0.20) & (adx1h < 0.20)),
-        (1, -1, (rsi15 > 0.20) & (adx1h < 0.20)),
-        # pullback: dip (15m RSI) against a 4h trend
-        (2, 1, up4h & (rsi15 < -0.15)),
-        (2, -1, dn4h & (rsi15 > 0.15)),
+        # breakout: 5m close leaves its recent channel in the direction of the trend
+        (0, 1, (c > chan_hi) & up),
+        (0, -1, (c < chan_lo) & dn),
+        # reversal: 15m RSI extreme while there is no trend
+        (1, 1, (rsi15 < -0.20) & flat),
+        (1, -1, (rsi15 > 0.20) & flat),
+        # pullback: 5m or 15m RSI dips against the trend
+        (2, 1, up & ((rsi5 < -0.20) | (rsi15 < -0.15))),
+        (2, -1, dn & ((rsi5 > 0.20) | (rsi15 > 0.15))),
     ]
     out = []
     for setup, side, cond in conds:
@@ -49,7 +64,7 @@ def event_feature_names(cols):
 def prepare_symbol(candles, cfg, derivs=None):
     """Candles of one symbol -> (bars, events).
 
-    bars:   array [close_ms, high, low, close, atr] per base candle
+    bars:   array [close_ms, high, low, close, atr, trend] per base candle
     events: {row: [(setup_index, side, feature_vector), ...]}
     """
     frame = build_features(candles, cfg.base_tf, cfg.atr_tf, derivs)
@@ -62,5 +77,6 @@ def prepare_symbol(candles, cfg, derivs=None):
         onehot = np.zeros(len(SETUPS) + 1, np.float32)
         onehot[setup], onehot[-1] = 1, side
         events.setdefault(row, []).append((setup, side, np.concatenate([x, onehot])))
-    bars = frame[["close_ms", "high", "low", "close", "atr_ref"]].to_numpy(float)
+    bars = np.column_stack([frame[["close_ms", "high", "low", "close", "atr_ref"]].to_numpy(float),
+                            trend(frame).to_numpy(float)])
     return bars, events
